@@ -1,8 +1,17 @@
 import os
+import time
 import pandas as pd
 import numpy as np
+import logging
 from supabase import create_client
 from dotenv import load_dotenv
+from tqdm import tqdm
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -22,7 +31,16 @@ def clean(v):
 
     return v
 
-def load_to_supabase(df, table_name):
+def chunk_list(data, batch_size):
+    for i in range(0, len(data), batch_size):
+        yield i, data[i:i + batch_size]
+
+def load_to_supabase(
+    df,
+    table_name,
+    batch_size=8000,
+    sleep_seconds=0.75
+):
     # Wipe old data first
     supabase_client.rpc(f"truncate_{table_name.lower()}").execute()
 
@@ -39,8 +57,25 @@ def load_to_supabase(df, table_name):
 
     records = [
         {k: clean(v) for k, v in row.items()}
-        for row in modified_df.to_dict("records")
+        for row in tqdm(modified_df.to_dict("records"), desc="Cleaning rows")
     ]
 
     # Save fresh data
-    supabase_client.table(table_name).insert(records).execute()
+    total = len(records)
+
+    for start, batch in tqdm(
+        chunk_list(records, batch_size),
+        total=(len(records) + batch_size - 1) // batch_size,
+        desc=f"Loading {table_name}"
+    ):
+        end = start + len(batch)
+
+        try:
+            supabase_client.table(table_name).insert(batch).execute()
+        except Exception as e:
+            logger.error(f"Batch {start}-{end} failed: {e}")
+            raise
+
+        time.sleep(sleep_seconds)
+
+    logger.info("✅ Loaded into Supabase successfully")
